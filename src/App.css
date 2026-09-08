@@ -3342,8 +3342,10 @@
 .device-sync-scope { padding-top: 3px; display: flex; flex-direction: column; gap: 10px; }
 .device-sync-scope > strong { font-size: 13px; }
 .device-sync-scope > div { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.device-sync-scope > div span { min-height: 42px; padding: 0 11px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-app); }
-.device-sync-scope > div svg { color: var(--accent-primary); }
+.device-sync-scope > div > article { min-height: 42px; padding: 11px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-app); }
+.device-sync-scope > div svg { color: var(--accent-primary); flex-shrink: 0; }
+.device-sync-scope article > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.device-sync-scope small { color: var(--text-secondary); font-size: 11px; line-height: 1.5; }
 .device-sync-scope > div b { font-size: 11px; }
 .device-sync-scope > p { margin: 0; color: var(--text-secondary); font-size: 11px; }
 .device-sync-setup-panel .device-sync-panel-actions { justify-content: space-between; }

@@ -360,7 +360,7 @@ fn device_sync_devices_are_upserted_and_sorted_by_recent_activity() {
 }
 
 #[test]
-fn device_alias_is_local_and_preserves_the_discovered_name() {
+fn device_name_is_owned_by_the_current_device() {
     let (_dir, store) = make_store();
     store
         .upsert_device_sync_device(&crate::core::device_sync::types::DeviceSyncDevice {
@@ -374,18 +374,21 @@ fn device_alias_is_local_and_preserves_the_discovered_name() {
         .unwrap();
 
     store
+        .set_setting("device_sync.local_device_id", "home-mac")
+        .unwrap();
+    store
         .set_device_sync_device_alias("home-mac", Some("家里电脑"))
         .unwrap();
 
-    let devices = store.list_device_sync_devices("office-mac").unwrap();
-    assert_eq!(devices[0].name, "MacBook-Pro.local");
-    assert_eq!(devices[0].alias.as_deref(), Some("家里电脑"));
+    let devices = store.list_device_sync_devices("home-mac").unwrap();
+    assert_eq!(devices[0].name, "家里电脑");
+    assert_eq!(devices[0].alias, None);
 
     store
         .set_device_sync_device_alias("home-mac", None)
         .unwrap();
     assert_eq!(
-        store.list_device_sync_devices("office-mac").unwrap()[0].alias,
+        store.list_device_sync_devices("home-mac").unwrap()[0].alias,
         None
     );
 }

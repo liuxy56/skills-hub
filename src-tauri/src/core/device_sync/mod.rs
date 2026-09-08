@@ -221,7 +221,13 @@ impl<'a> DeviceSyncService<'a> {
     pub fn devices(&self) -> Result<Vec<DeviceSyncDevice>> {
         self.require_config()?;
         let current = self.local_device_identity()?;
-        self.store.list_device_sync_devices(&current.id)
+        let mut devices = self.store.list_device_sync_devices(&current.id)?;
+        for device in &mut devices {
+            if device.is_current {
+                device.name.clone_from(&current.name);
+            }
+        }
+        Ok(devices)
     }
 
     pub fn sync(&self) -> Result<SyncRunResult> {
@@ -614,9 +620,14 @@ impl<'a> DeviceSyncService<'a> {
                 id
             }
         };
+        let name = self
+            .store
+            .get_setting(&format!("device_sync.device_alias.{id}"))?
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(local_device_name);
         Ok(DeviceSyncDevice {
             id,
-            name: local_device_name(),
+            name,
             alias: None,
             last_commit: None,
             last_seen_at: now_ms(),
@@ -1940,7 +1951,46 @@ mod tests {
         );
         service_a.sync().unwrap();
         service_b.sync().unwrap();
+        // Existing local aliases become the device's published name.
+        a.set_setting("device_sync.device_alias.office", "办公室 Mac")
+            .unwrap();
+        b.set_setting("device_sync.device_alias.office", "旧备注")
+            .unwrap();
         service_a.sync().unwrap();
+        service_b.check().unwrap();
+        assert_eq!(
+            service_b
+                .devices()
+                .unwrap()
+                .iter()
+                .find(|d| d.id == "office")
+                .unwrap()
+                .name,
+            "办公室 Mac"
+        );
+        assert!(service_b
+            .devices()
+            .unwrap()
+            .iter()
+            .all(|d| d.alias.is_none()));
+        a.set_device_sync_device_alias("office", Some("工作电脑"))
+            .unwrap();
+        assert_eq!(service_a.devices().unwrap()[0].name, "工作电脑");
+        assert!(b
+            .set_device_sync_device_alias("office", Some("不允许修改他机"))
+            .is_err());
+        service_a.sync().unwrap();
+        service_b.sync().unwrap();
+        assert_eq!(
+            service_b
+                .devices()
+                .unwrap()
+                .iter()
+                .find(|d| d.id == "office")
+                .unwrap()
+                .name,
+            "工作电脑"
+        );
         let remote = Repository::open_bare(bare).unwrap();
         let commit = remote
             .find_reference("refs/heads/main")
@@ -1953,6 +2003,7 @@ mod tests {
             .expect("shared registry must be published");
         let blob = remote.find_blob(entry.id()).unwrap();
         let registry: serde_json::Value = serde_json::from_slice(blob.content()).unwrap();
+        assert_eq!(registry["devices"]["office"]["name"], "工作电脑");
         assert_eq!(registry["version"], 1);
         assert_eq!(registry["devices"].as_object().unwrap().len(), 2);
         assert!(
@@ -1971,6 +2022,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(service_b.devices().unwrap().len(), 2);
+        a.set_device_sync_device_alias("office", None).unwrap();
+        assert_eq!(service_a.devices().unwrap()[0].name, local_device_name());
+        service_a.sync().unwrap();
     }
 
     #[test]

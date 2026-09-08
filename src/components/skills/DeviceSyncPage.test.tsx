@@ -12,6 +12,49 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => () => undefi
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
 
 describe('DeviceSyncPage', () => {
+  it('only renames this device and refreshes its shared name without starting sync', async () => {
+    let renamed = false
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_device_sync_config') return Promise.resolve({ provider: 'github', remote_url: 'https://github.com/example/sync.git', branch: 'main', has_credential: true, visibility: 'private' })
+      if (command === 'get_device_sync_status') return Promise.resolve({ configured: true, is_running: false, last_run_status: 'success', conflict_count: 0 })
+      if (command === 'get_device_sync_devices') return Promise.resolve([
+        { id: 'local', name: renamed ? 'Office Mac' : 'Local Mac', alias: null, is_current: true, last_seen_at: 1000 },
+        { id: 'remote', name: 'Home PC', alias: 'Old remark', is_current: false, last_seen_at: 1000 },
+      ])
+      if (command === 'set_device_sync_device_alias') { renamed = true; return Promise.resolve() }
+      if (command === 'get_device_sync_pending_oauth') return Promise.resolve(null)
+      return Promise.resolve([])
+    })
+    render(<DeviceSyncPage active isTauri onSkillsChanged={vi.fn(async () => undefined)} onConflictCountChange={vi.fn()} onOpenToolIssues={vi.fn()} t={((key: string) => key) as TFunction} />)
+    await screen.findByText('Home PC')
+    expect(screen.queryByText('Old remark')).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'deviceSync.editDeviceAlias' })).toHaveLength(1)
+    fireEvent.click(screen.getByRole('button', { name: 'deviceSync.editDeviceAlias' }))
+    const input = screen.getByRole('textbox', { name: 'deviceSync.deviceAlias' })
+    expect((input as HTMLInputElement).value).toBe('Local Mac')
+    fireEvent.change(input, { target: { value: 'Office Mac' } })
+    fireEvent.click(screen.getByRole('button', { name: 'deviceSync.saveDeviceAlias' }))
+    await waitFor(() => expect(screen.getAllByText('Office Mac').length).toBeGreaterThan(0))
+    expect(invokeMock).toHaveBeenCalledWith('set_device_sync_device_alias', { deviceId: 'local', alias: 'Office Mac' })
+    expect(invokeMock.mock.calls.some(([command]) => command === 'run_device_sync')).toBe(false)
+  })
+
+  it('explains unavailable Gitee browser authorization and exposes manual connection', async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === 'get_device_sync_config' || command === 'get_device_sync_pending_oauth') return Promise.resolve(null)
+      if (command === 'get_device_sync_oauth_availability') return Promise.resolve([{ provider: 'gitee', available: false }])
+      if (command === 'get_device_sync_status') return Promise.resolve({ configured: false, is_running: false, conflict_count: 0 })
+      return Promise.resolve([])
+    })
+    render(<DeviceSyncPage active isTauri onSkillsChanged={vi.fn(async () => undefined)} onConflictCountChange={vi.fn()} onOpenToolIssues={vi.fn()} t={((key: string) => key) as TFunction} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Gitee' }))
+    expect(await screen.findByText('deviceSync.oauthUnavailableTitle')).toBeTruthy()
+    expect(screen.getByText('deviceSync.oauthUnavailable')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'deviceSync.signInWith' })).toBeNull()
+    expect(screen.queryByText('deviceSync.oauthHelp')).toBeNull()
+    expect(screen.getByText('deviceSync.otherConnectionMethods').closest('details')?.open).toBe(true)
+  })
+
   it('shows named changes and explicitly marks legacy history without details', async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === 'get_device_sync_config') return Promise.resolve({ provider: 'github', remote_url: 'https://github.com/example/sync.git', branch: 'main', has_credential: true, visibility: 'private' })

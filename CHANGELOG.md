@@ -7,6 +7,10 @@ All notable changes to this project will be documented in this file.
 ## [0.10.0]
 
 ### Changed
+- **Unavailable browser authorization**: Clearly identify unsupported provider authorization in the current build, hide the unavailable sign-in action, and expand Token/SSH connection options.
+- **Shared device names**: Renaming this device publishes its name on the next sync. Other devices display that name after fetching; legacy remote aliases no longer override it, and only this device can be renamed.
+- **Sync scope explanation**: Clarify synced files, descriptions, tags, Git history, and device records; explain device-local data and when other devices receive changes.
+- **Sidebar organization**: Place device sync first and recycle bin last in Management Center; keep the workspace focused on browsing and adding Skills.
 - **Recycle bin storage locations**: Help now shows actual device paths for manual and device-sync file backups, with selectable paths. Database details remain internal.
 - **Localized recycle bin errors**: Restore, load, and permanent-delete failures now use English, Chinese, and Korean messages, including actionable guidance for occupied locations and missing backups.
 - **Clear deletion labels**: Single and bulk Skill actions use “Delete”; confirmation text explains the local Skills Hub recycle bin and 30-day recovery.

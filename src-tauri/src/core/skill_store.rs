@@ -700,10 +700,10 @@ impl SkillStore {
     pub fn list_device_sync_devices(&self, current_id: &str) -> Result<Vec<DeviceSyncDevice>> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT device.id, device.name, alias.value, device.last_commit, device.last_seen_at
+                "SELECT device.id, COALESCE(alias.value, device.name), NULL, device.last_commit, device.last_seen_at
                  FROM device_sync_devices AS device
                  LEFT JOIN settings AS alias
-                   ON alias.key = 'device_sync.device_alias.' || device.id
+                   ON alias.key = 'device_sync.device_alias.' || device.id AND device.id = ?1
                  ORDER BY CASE WHEN id = ?1 THEN 0 ELSE 1 END, last_seen_at DESC",
             )?;
             let rows = stmt.query_map(params![current_id], |row| {
@@ -723,6 +723,9 @@ impl SkillStore {
     }
 
     pub fn set_device_sync_device_alias(&self, device_id: &str, alias: Option<&str>) -> Result<()> {
+        if self.get_setting("device_sync.local_device_id")?.as_deref() != Some(device_id) {
+            bail!("only the current device can be renamed");
+        }
         self.with_conn(|conn| {
             let exists = conn.query_row(
                 "SELECT EXISTS(SELECT 1 FROM device_sync_devices WHERE id = ?1)",
