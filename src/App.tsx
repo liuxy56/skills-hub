@@ -19,6 +19,8 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import ExplorePage from './components/skills/ExplorePage'
 import DeviceSyncPage from './components/skills/DeviceSyncPage'
+import RecycleBinPage from './components/skills/RecycleBinPage'
+import ConfirmActionModal from './components/skills/modals/ConfirmActionModal'
 import FilterBar from './components/skills/FilterBar'
 import { getSkillsView } from './components/skills/skillsView'
 import SkillDetailView from './components/skills/SkillDetailView'
@@ -95,6 +97,7 @@ import type {
   ToolOption,
   ToolStatusDto,
   UpdateResultDto,
+  RecycleBinItem,
 } from './components/skills/types'
 
 type SkillScopeState = Record<
@@ -112,6 +115,7 @@ type ActiveView =
   | 'settings'
   | 'manage'
   | 'device-sync'
+  | 'recycle-bin'
 type ManagementTab = 'tags' | 'tools' | 'updates'
 type UpdaterProxyOptions = { proxy?: string }
 type UpdaterDownloadOptions = DownloadOptions & UpdaterProxyOptions
@@ -217,6 +221,7 @@ function App() {
   const [activeView, setActiveView] = useState<ActiveView>('myskills')
   const [managementTab, setManagementTab] = useState<ManagementTab>('tags')
   const [deviceSyncConflictCount, setDeviceSyncConflictCount] = useState(0)
+  const [recycleBinCount, setRecycleBinCount] = useState(0)
   const [detailSkill, setDetailSkill] = useState<ManagedSkill | null>(null)
   const [tags, setTags] = useState<TagWithCountDto[]>([])
   const [selectedTagIds, setSelectedTagIds] = useState<number[]>([])
@@ -300,6 +305,18 @@ function App() {
     },
     [isTauri],
   )
+  const refreshRecycleBinCount = useCallback(async () => {
+    if (!isTauri) return
+    try {
+      const items = await invokeTauri<RecycleBinItem[]>('get_recycle_bin_items')
+      setRecycleBinCount(items.length)
+    } catch {
+      // The recycle bin page reports load errors when the user opens it.
+    }
+  }, [invokeTauri, isTauri])
+
+  useEffect(() => { void refreshRecycleBinCount() }, [refreshRecycleBinCount])
+
   const formatErrorMessage = useCallback(
     (raw: string) => {
       if (raw.includes('CANCELLED|')) {
@@ -1477,7 +1494,7 @@ function App() {
   }, [featuredSkills.length, invokeTauri])
 
   const handleViewChange = useCallback(
-    (view: 'myskills' | 'explore' | 'manage' | 'device-sync') => {
+    (view: 'myskills' | 'explore' | 'manage' | 'device-sync' | 'recycle-bin') => {
       setShowAddModal(false)
       setActiveView(view)
       if (view !== 'myskills') {
@@ -1757,7 +1774,6 @@ function App() {
     )
     setShowBulkSyncModal(true)
   }, [
-    bulkSelectedSkills.length,
     bulkSelectedSkills,
     getSkillScope,
     installedToolIds,
@@ -2188,6 +2204,7 @@ function App() {
       }
       await loadManagedSkills()
       await loadTags()
+      await refreshRecycleBinCount()
       setShowBulkDeleteModal(false)
       if (errors.length > 0) {
         showActionErrors(errors)
@@ -2210,6 +2227,7 @@ function App() {
     invokeTauri,
     loadManagedSkills,
     loadTags,
+    refreshRecycleBinCount,
     showActionErrors,
     t,
   ])
@@ -3077,6 +3095,7 @@ function App() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
+      await refreshRecycleBinCount()
       setLoading(false)
       setLoadingStartAt(null)
     }
@@ -3572,6 +3591,16 @@ function App() {
   }).length
   const pendingUpdateCount = autoUpdateConfig?.last_failed ?? 0
 
+  const handleRecycleBinChanged = useCallback((count?: number) => {
+    if (typeof count === 'number') {
+      setRecycleBinCount(count)
+      return
+    }
+    void refreshRecycleBinCount()
+    void loadManagedSkills()
+    void loadTags()
+  }, [loadManagedSkills, loadTags, refreshRecycleBinCount])
+
   const handleManagementTabChange = (tab: ManagementTab) => {
     setShowAddModal(false)
     setManagementTab(tab)
@@ -3601,6 +3630,7 @@ function App() {
         toolCount={toolStatus?.tools.length ?? 0}
         updateCount={pendingUpdateCount}
         syncConflictCount={deviceSyncConflictCount}
+        recycleBinCount={recycleBinCount}
         appVersion={appVersion}
         updateAvailableVersion={updateAvailableVersion}
         updateChecking={updateChecking}
@@ -3618,6 +3648,14 @@ function App() {
       <WindowResizeHandles enabled={isTauri} />
 
       <main className="skills-main">
+        <RecycleBinPage
+          installedTools={installedTools}
+          active={activeView === 'recycle-bin'}
+          isTauri={isTauri}
+          invokeTauri={invokeTauri}
+          onChanged={handleRecycleBinChanged}
+          t={t}
+        />
         <DeviceSyncPage
           active={activeView === 'device-sync'}
           isTauri={isTauri}
@@ -3627,7 +3665,7 @@ function App() {
           onConflictCountChange={setDeviceSyncConflictCount}
           t={t}
         />
-        {activeView === 'device-sync' ? null : activeView === 'detail' && detailSkill ? (
+        {activeView === 'device-sync' || activeView === 'recycle-bin' ? null : activeView === 'detail' && detailSkill ? (
           <SkillDetailView
             skill={detailSkill}
             onBack={handleBackToList}
@@ -4083,50 +4121,13 @@ function App() {
         t={t}
       />
 
-      {pendingDeleteTag ? (
-        <div className="modal-backdrop" onClick={loading ? undefined : handleCloseDeleteTag}>
-          <div
-            className="modal modal-delete tag-delete-modal"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div className="modal-header">
-              <div className="modal-title">{t('deleteTagTitle')}</div>
-              <button
-                className="modal-close"
-                type="button"
-                onClick={handleCloseDeleteTag}
-                disabled={loading}
-              >
-                ×
-              </button>
-            </div>
-            <div className="modal-body tag-delete-body">
-              {t('deleteTagConfirm', {
-                name: pendingDeleteTag.name,
-                count: pendingDeleteTag.skill_count,
-              })}
-            </div>
-            <div className="modal-footer">
-              <button
-                className="btn btn-secondary"
-                type="button"
-                onClick={handleCloseDeleteTag}
-                disabled={loading}
-              >
-                {t('cancel')}
-              </button>
-              <button
-                className="btn btn-danger"
-                type="button"
-                onClick={() => void handleConfirmDeleteTag()}
-                disabled={loading}
-              >
-                {t('deleteAction')}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <ConfirmActionModal
+        open={Boolean(pendingDeleteTag)} loading={loading}
+        title={t('deleteTagTitle')}
+        body={t('deleteTagConfirm', { name: pendingDeleteTag?.name ?? '', count: pendingDeleteTag?.skill_count ?? 0 })}
+        cancelLabel={t('cancel')} confirmLabel={t('deleteAction')}
+        onRequestClose={handleCloseDeleteTag} onConfirm={() => void handleConfirmDeleteTag()}
+      />
 
       {showLocalPickModal ? (
         <LocalPickModal

@@ -20,6 +20,8 @@ const SCHEMA_VERSION: i32 = 6;
 const PRE_RELEASE_DEVICE_SYNC_SCHEMA_VERSION: i32 = 7;
 const DEVICE_SYNC_SCHEMA_VERSION_KEY: &str = "schema.device_sync";
 const DEVICE_SYNC_SCHEMA_VERSION: &str = "1";
+const RECYCLE_BIN_SCHEMA_VERSION_KEY: &str = "schema.recycle_bin";
+const RECYCLE_BIN_SCHEMA_VERSION: &str = "1";
 const DEVICE_SYNC_STARTUP_CREDENTIAL_CONSENT_MIGRATION: &str =
     "migration.device_sync_startup_credential_consent_v1";
 
@@ -68,7 +70,9 @@ CREATE TABLE IF NOT EXISTS device_sync_tombstones (
   skill_name TEXT NOT NULL,
   trash_path TEXT NOT NULL,
   deleted_at INTEGER NOT NULL,
-  expires_at INTEGER NOT NULL
+  expires_at INTEGER NOT NULL,
+  deletion_source TEXT NOT NULL DEFAULT 'sync',
+  metadata_json TEXT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_device_sync_runs_started_at
@@ -159,7 +163,7 @@ pub(crate) struct TrashMetadata {
     pub tags: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SkillRecord {
     pub id: String,
     pub name: String,
@@ -227,7 +231,7 @@ impl SkillRecord {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct SkillTargetRecord {
     pub id: String,
     pub skill_id: String,
@@ -307,6 +311,7 @@ impl SkillStore {
             }
 
             conn.execute_batch(DEVICE_SYNC_SCHEMA_V1)?;
+            ensure_recycle_bin_schema(conn)?;
             conn.execute_batch("CREATE TABLE IF NOT EXISTS skill_source_checks (
                 skill_id TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
                 error_code TEXT NULL, checked_at INTEGER NOT NULL
@@ -330,6 +335,11 @@ impl SkillStore {
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)
                  ON CONFLICT(key) DO NOTHING",
                 params![DEVICE_SYNC_SCHEMA_VERSION_KEY, DEVICE_SYNC_SCHEMA_VERSION],
+            )?;
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO NOTHING",
+                params![RECYCLE_BIN_SCHEMA_VERSION_KEY, RECYCLE_BIN_SCHEMA_VERSION],
             )?;
             if user_version == PRE_RELEASE_DEVICE_SYNC_SCHEMA_VERSION {
                 conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -847,6 +857,7 @@ impl SkillStore {
         })
     }
 
+    #[allow(dead_code)]
     pub fn add_device_sync_trash(&self, entry: &TrashEntry) -> Result<()> {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
@@ -870,6 +881,125 @@ impl SkillStore {
                 let metadata = TrashMetadata { description, tags };
                 tx.execute("INSERT INTO settings (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![format!("device_sync.trash_metadata.{}", entry.id), serde_json::to_string(&metadata)?])?;
             }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn commit_recycle_bin_archive(
+        &self,
+        entry: &TrashEntry,
+        deletion_source: &str,
+        metadata_json: &str,
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM skills WHERE id=?1)",
+                params![entry.skill_id],
+                |row| row.get(0),
+            )?;
+            anyhow::ensure!(exists, "Skill not found: {}", entry.skill_id);
+            tx.execute(
+                "INSERT INTO device_sync_tombstones
+                 (id, skill_id, skill_name, trash_path, deleted_at, expires_at, deletion_source, metadata_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![entry.id, entry.skill_id, entry.skill_name, entry.trash_path,
+                    entry.deleted_at, entry.expires_at, deletion_source, metadata_json],
+            )?;
+            tx.execute("DELETE FROM skills WHERE id=?1", params![entry.skill_id])?;
+            for key in ["shared_source", "source_baseline", "source_origin"] {
+                tx.execute(
+                    "DELETE FROM settings WHERE key=?1",
+                    params![format!("device_sync.{key}.{}", entry.skill_id)],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn list_recycle_bin_rows(
+        &self,
+    ) -> Result<Vec<(TrashEntry, String, Option<String>)>> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, skill_id, skill_name, trash_path, deleted_at, expires_at,
+                        deletion_source, metadata_json
+                 FROM device_sync_tombstones ORDER BY deleted_at DESC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    TrashEntry {
+                        id: row.get(0)?,
+                        skill_id: row.get(1)?,
+                        skill_name: row.get(2)?,
+                        trash_path: row.get(3)?,
+                        deleted_at: row.get(4)?,
+                        expires_at: row.get(5)?,
+                    },
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    pub(crate) fn get_recycle_bin_row(
+        &self,
+        id: &str,
+    ) -> Result<Option<(TrashEntry, String, Option<String>)>> {
+        Ok(self
+            .list_recycle_bin_rows()?
+            .into_iter()
+            .find(|(entry, _, _)| entry.id == id))
+    }
+
+    pub(crate) fn restore_recycle_bin_snapshot(
+        &self,
+        id: &str,
+        skill: &SkillRecord,
+        targets: &[SkillTargetRecord],
+        tags: &[String],
+    ) -> Result<()> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let pending: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM device_sync_tombstones WHERE id=?1)",
+                params![id], |row| row.get(0),
+            )?;
+            anyhow::ensure!(pending, "recycle bin item not found");
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM skills WHERE id=?1)",
+                params![skill.id], |row| row.get(0),
+            )?;
+            anyhow::ensure!(!exists, "Skill already exists; cannot restore it");
+            upsert_skill_with_conn(&tx, skill)?;
+            for target in targets { upsert_skill_target_with_conn(&tx, target)?; }
+            for name in tags {
+                let normalized = normalize_tag_name(name)?;
+                tx.execute("INSERT INTO skill_tags (name,created_at,updated_at) VALUES (?1,?2,?2) ON CONFLICT(name) DO NOTHING", params![normalized, now_ms()])?;
+                tx.execute("INSERT OR IGNORE INTO skill_tag_links (skill_id,tag_id,created_at) SELECT ?1,id,?3 FROM skill_tags WHERE name=?2 COLLATE NOCASE", params![skill.id, normalized, now_ms()])?;
+            }
+            tx.execute("DELETE FROM device_sync_tombstones WHERE id=?1", params![id])?;
+            tx.execute("DELETE FROM settings WHERE key=?1", params![format!("device_sync.trash_metadata.{id}")])?;
+            tx.commit()?;
+            Ok(())
+        })
+    }
+
+    pub(crate) fn remove_recycle_bin_row(&self, id: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM device_sync_tombstones WHERE id=?1",
+                params![id],
+            )?;
+            tx.execute(
+                "DELETE FROM settings WHERE key=?1",
+                params![format!("device_sync.trash_metadata.{id}")],
+            )?;
             tx.commit()?;
             Ok(())
         })
@@ -1216,6 +1346,7 @@ impl SkillStore {
         })
     }
 
+    #[allow(dead_code)]
     pub fn delete_skill(&self, skill_id: &str) -> Result<()> {
         self.with_conn(|conn| {
             let tx = conn.unchecked_transaction()?;
@@ -1802,6 +1933,30 @@ fn truncate_sqlite_wal(conn: &Connection) -> Result<()> {
     if busy != 0 {
         anyhow::bail!("secure setting deletion could not truncate the SQLite WAL");
     }
+    Ok(())
+}
+
+fn ensure_recycle_bin_schema(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(device_sync_tombstones)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+    drop(stmt);
+    if !columns.contains("deletion_source") {
+        conn.execute_batch(
+            "ALTER TABLE device_sync_tombstones
+             ADD COLUMN deletion_source TEXT NOT NULL DEFAULT 'sync';",
+        )?;
+    }
+    if !columns.contains("metadata_json") {
+        conn.execute_batch(
+            "ALTER TABLE device_sync_tombstones ADD COLUMN metadata_json TEXT NULL;",
+        )?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_device_sync_tombstones_expires_at
+         ON device_sync_tombstones(expires_at);",
+    )?;
     Ok(())
 }
 

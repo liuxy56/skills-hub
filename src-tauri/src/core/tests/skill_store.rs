@@ -237,6 +237,48 @@ fn device_sync_schema_keeps_v091_database_compatibility() {
         store.get_setting("schema.device_sync").unwrap().as_deref(),
         Some("1")
     );
+    assert_eq!(
+        store.get_setting("schema.recycle_bin").unwrap().as_deref(),
+        Some("1")
+    );
+}
+
+#[test]
+fn recycle_bin_schema_upgrades_the_previous_stable_table_in_place() {
+    let (_dir, store) = make_store();
+    let conn = Connection::open(store.db_path()).unwrap();
+    conn.execute_batch(
+        "DROP TABLE device_sync_tombstones;
+         CREATE TABLE device_sync_tombstones (
+           id TEXT PRIMARY KEY, skill_id TEXT NOT NULL, skill_name TEXT NOT NULL,
+           trash_path TEXT NOT NULL, deleted_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+         );
+         DELETE FROM settings WHERE key='schema.recycle_bin';",
+    )
+    .unwrap();
+    drop(conn);
+
+    store.ensure_schema().unwrap();
+
+    let conn = Connection::open(store.db_path()).unwrap();
+    let columns = conn
+        .prepare("PRAGMA table_info(device_sync_tombstones)")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(columns.contains(&"deletion_source".to_string()));
+    assert!(columns.contains(&"metadata_json".to_string()));
+    assert_eq!(
+        conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+            .unwrap(),
+        6
+    );
+    assert_eq!(
+        store.get_setting("schema.recycle_bin").unwrap().as_deref(),
+        Some("1")
+    );
 }
 
 #[test]

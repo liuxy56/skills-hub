@@ -164,6 +164,33 @@ pub fn run() {
                 }
             });
 
+            let recycle_handle = app.handle().clone();
+            let recycle_store = store.clone();
+            std::thread::spawn(move || loop {
+                let root = match recycle_handle.path().app_data_dir() {
+                    Ok(path) => path.join("recycle-bin"),
+                    Err(error) => {
+                        log::warn!("resolve recycle bin directory failed: {error:#}");
+                        std::thread::sleep(std::time::Duration::from_secs(24 * 60 * 60));
+                        continue;
+                    }
+                };
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                match core::recycle_bin::RecycleBinService::new(&recycle_store, root)
+                    .cleanup_expired(now)
+                {
+                    Ok(removed) if removed > 0 => {
+                        log::info!("cleaned up {removed} expired recycle bin items");
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!("recycle bin cleanup failed: {error:#}"),
+                }
+                std::thread::sleep(std::time::Duration::from_secs(24 * 60 * 60));
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -239,6 +266,10 @@ pub fn run() {
             commands::set_device_sync_device_alias,
             commands::get_device_sync_conflicts,
             commands::get_device_sync_trash,
+            commands::get_recycle_bin_items,
+            commands::get_recycle_bin_locations,
+            commands::restore_recycle_bin_item,
+            commands::delete_recycle_bin_item,
             commands::resolve_device_sync_conflict,
             commands::restore_device_sync_trash,
             commands::disconnect_device_sync,

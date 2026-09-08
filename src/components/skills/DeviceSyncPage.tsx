@@ -48,7 +48,6 @@ import type {
   DeviceSyncRemoteRepository,
   DeviceSyncRunResult,
   DeviceSyncStatus,
-  DeviceSyncTrashEntry,
 } from './types'
 import {
   REPOSITORY_LOAD_TIMEOUT_MS,
@@ -106,7 +105,6 @@ const DeviceSyncPage = ({
   const syncHelpOpen = helpOpen === 'sync'
   const helpTriggerRef = useRef<HTMLButtonElement | null>(null)
   const [conflicts, setConflicts] = useState<DeviceSyncConflict[]>([])
-  const [trash, setTrash] = useState<DeviceSyncTrashEntry[]>([])
   const [preview, setPreview] = useState<DeviceSyncChangeSummary | null>(null)
   const [form, setForm] = useState(buildDeviceSyncForm)
   const [busy, setBusy] = useState<string | null>(null)
@@ -197,13 +195,12 @@ const DeviceSyncPage = ({
   const load = useCallback(async ({ refreshRepositories = false }: LoadOptions = {}) => {
     if (!isTauri) return
     const historyRequest = ++historyRequestRef.current
-    const [nextConfig, nextStatus, nextHistory, nextConflicts, nextTrash, availability, pendingOAuth] =
+    const [nextConfig, nextStatus, nextHistory, nextConflicts, availability, pendingOAuth] =
       await Promise.all([
         invoke<DeviceSyncConfigDto | null>('get_device_sync_config'),
         invoke<DeviceSyncStatus>('get_device_sync_status'),
         invoke<DeviceSyncHistoryEntry[]>('get_device_sync_history', { limit: historyLimitRef.current }),
         invoke<DeviceSyncConflict[]>('get_device_sync_conflicts'),
-        invoke<DeviceSyncTrashEntry[]>('get_device_sync_trash'),
         invoke<DeviceSyncOAuthAvailability[]>('get_device_sync_oauth_availability'),
         invoke<DeviceSyncPendingOAuth | null>('get_device_sync_pending_oauth'),
       ])
@@ -216,7 +213,6 @@ const DeviceSyncPage = ({
     if (historyRequest === historyRequestRef.current) setHistory(nextHistory)
     setConflicts(nextConflicts)
     setExpandedConflictId((current) => current ?? nextConflicts[0]?.id ?? null)
-    setTrash(nextTrash)
     setOauthAvailability(availability)
     onConflictCountChange(nextConflicts.length)
     const nextForm = buildDeviceSyncForm(nextConfig)
@@ -254,19 +250,17 @@ const DeviceSyncPage = ({
   const refreshSyncActivity = useCallback(async () => {
     if (!isTauri) return
     const historyRequest = ++historyRequestRef.current
-    const [nextStatus, nextDevices, nextHistory, nextConflicts, nextTrash] = await Promise.all([
+    const [nextStatus, nextDevices, nextHistory, nextConflicts] = await Promise.all([
       invoke<DeviceSyncStatus>('get_device_sync_status'),
       invoke<DeviceSyncDevice[]>('get_device_sync_devices'),
       invoke<DeviceSyncHistoryEntry[]>('get_device_sync_history', { limit: historyLimitRef.current }),
       invoke<DeviceSyncConflict[]>('get_device_sync_conflicts'),
-      invoke<DeviceSyncTrashEntry[]>('get_device_sync_trash'),
     ])
     setStatus(nextStatus)
     setDevices(nextDevices)
     if (historyRequest === historyRequestRef.current) setHistory(nextHistory)
     setConflicts(nextConflicts)
     setExpandedConflictId((current) => current ?? nextConflicts[0]?.id ?? null)
-    setTrash(nextTrash)
     onConflictCountChange(nextConflicts.length)
   }, [isTauri, onConflictCountChange])
 
@@ -537,13 +531,6 @@ const DeviceSyncPage = ({
       })
       await Promise.all([load({ refreshRepositories: false }), onSkillsChanged()])
       toast.success(t('deviceSync.conflictResolved'))
-    })
-
-  const restore = (id: string) =>
-    runAction(id, async () => {
-      await invoke('restore_device_sync_trash', { trashId: id })
-      await Promise.all([load({ refreshRepositories: false }), onSkillsChanged()])
-      toast.success(t('deviceSync.restored'))
     })
 
   const editDeviceAlias = (device: DeviceSyncDevice) => {
@@ -829,7 +816,7 @@ const DeviceSyncPage = ({
         ) : (
           <>
             {changes ? <section className="device-sync-preview"><strong>{t('deviceSync.previewTitle')}</strong><span>{t('deviceSync.previewSummary', changes)}</span></section> : null}
-            <section className="device-sync-panel device-sync-activity-panel"><div className="device-sync-tabs" role="tablist" aria-label={t('deviceSync.activity')}><button className={activityTab === 'devices' ? 'active' : ''} type="button" role="tab" aria-selected={activityTab === 'devices'} onClick={() => setActivityTab('devices')}>{t('deviceSync.devices')}</button><button className={activityTab === 'history' ? 'active' : ''} type="button" role="tab" aria-selected={activityTab === 'history'} onClick={() => setActivityTab('history')}>{t('deviceSync.history')}</button><button className={activityTab === 'conflicts' ? 'active attention' : ''} type="button" role="tab" aria-selected={activityTab === 'conflicts'} onClick={() => setActivityTab('conflicts')}>{t('deviceSync.conflicts')}{conflicts.length ? <b>{conflicts.length}</b> : null}</button><button className={activityTab === 'trash' ? 'active' : ''} type="button" role="tab" aria-selected={activityTab === 'trash'} onClick={() => setActivityTab('trash')}>{t('deviceSync.trash')}</button><button className="device-sync-settings-trigger" type="button" onClick={() => openSettingsDrawer()}><Settings size={15} />{t('deviceSync.syncSettings')}</button></div>
+            <section className="device-sync-panel device-sync-activity-panel"><div className="device-sync-tabs" role="tablist" aria-label={t('deviceSync.activity')}><button className={activityTab === 'devices' ? 'active' : ''} type="button" role="tab" aria-selected={activityTab === 'devices'} onClick={() => setActivityTab('devices')}>{t('deviceSync.devices')}</button><button className={activityTab === 'history' ? 'active' : ''} type="button" role="tab" aria-selected={activityTab === 'history'} onClick={() => setActivityTab('history')}>{t('deviceSync.history')}</button><button className={activityTab === 'conflicts' ? 'active attention' : ''} type="button" role="tab" aria-selected={activityTab === 'conflicts'} onClick={() => setActivityTab('conflicts')}>{t('deviceSync.conflicts')}{conflicts.length ? <b>{conflicts.length}</b> : null}</button><button className="device-sync-settings-trigger" type="button" onClick={() => openSettingsDrawer()}><Settings size={15} />{t('deviceSync.syncSettings')}</button></div>
               {activityTab === 'devices' ? <div className="device-sync-devices"><p className="device-sync-devices-note">{t('deviceSync.devicesRouteNote')}</p><div className="device-sync-device-row header"><span>{t('deviceSync.device')}</span><span>{t('deviceSync.lastActive')}</span></div>{devices.length ? devices.map((device) => <article className="device-sync-device-row" key={device.id}>{editingDeviceId === device.id ? <form className="device-sync-device-alias-form" onSubmit={(event) => { event.preventDefault(); void saveDeviceAlias(device.id) }}><Monitor size={16} /><input autoFocus maxLength={80} value={deviceAliasDraft} placeholder={device.name} aria-label={t('deviceSync.deviceAlias')} onChange={(event) => setDeviceAliasDraft(event.target.value)} /><button type="submit" disabled={working} aria-label={t('deviceSync.saveDeviceAlias')} title={t('deviceSync.saveDeviceAlias')}>{busy === `device-alias:${device.id}` ? <LoaderCircle className="spin" size={14} /> : <Save size={14} />}</button><button type="button" disabled={working} aria-label={t('deviceSync.cancelDeviceAlias')} title={t('deviceSync.cancelDeviceAlias')} onClick={() => { setEditingDeviceId(null); setDeviceAliasDraft('') }}><X size={14} /></button></form> : <span className="device-sync-device-name"><Monitor size={16} /><span><strong>{device.alias || device.name}</strong>{device.alias ? <small>{device.name}</small> : null}</span>{device.is_current ? <b>{t('deviceSync.currentDevice')}</b> : null}<button type="button" disabled={working} aria-label={t('deviceSync.editDeviceAlias', { name: device.alias || device.name })} title={t('deviceSync.deviceAlias')} onClick={() => editDeviceAlias(device)}><Pencil size={13} /></button></span>}<time>{new Date(device.last_seen_at).toLocaleString()}</time></article>) : <p className="device-sync-empty">{t('deviceSync.noDevices')}</p>}</div> : null}
               {activityTab === 'history' ? <div className="device-sync-history-table">
                 {status?.last_run_status === 'unchanged' ? <p className="device-sync-no-change-note" role="status">{t('deviceSync.noChangeHistoryNote')}</p> : null}
@@ -857,7 +844,6 @@ const DeviceSyncPage = ({
                 {history.length >= historyLimitRef.current || loadingHistory ? <button className="btn btn-secondary device-sync-history-more" type="button" disabled={loadingHistory} onClick={loadMoreHistory}>{loadingHistory ? <LoaderCircle className="spin" size={15} /> : null}{t('deviceSync.loadMoreHistory')}</button> : null}
               </div> : null}
               {activityTab === 'conflicts' ? <div className="device-sync-conflicts">{conflicts.length ? conflicts.map((conflict) => { const expanded = expandedConflictId === conflict.id; const selection = conflictSelections[conflict.id]; return <article key={conflict.id} className={expanded ? 'expanded' : ''}><button className="device-sync-conflict-summary" type="button" onClick={() => setExpandedConflictId(expanded ? null : conflict.id)}>{expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}<Package size={17} /><strong>{conflict.skill_name}</strong><span>{t(conflict.base_commit ? 'deviceSync.sameFilesChanged' : 'deviceSync.missingCommonBaseline')}</span><em>{t('deviceSync.conflictFiles', { count: conflict.files.length })}</em></button>{expanded ? <div className="device-sync-conflict-detail"><div className="device-sync-conflict-files">{conflict.files.map((file) => <code key={file}>{file}</code>)}</div><div className="device-sync-resolution-options">{(['keep_local', 'use_remote'] as ConflictResolution[]).map((resolution) => <button key={resolution} className={selection === resolution ? 'selected' : ''} type="button" onClick={() => setConflictSelections((current) => ({ ...current, [conflict.id]: resolution }))}><span><strong>{t(`deviceSync.resolution.${resolution}.title`)}</strong></span><small>{t(`deviceSync.resolution.${resolution}.help`)}</small></button>)}</div><div className="device-sync-conflict-footer"><span><ShieldCheck size={14} />{t('deviceSync.conflictSafetyNote')}</span><button className="btn btn-primary" type="button" disabled={!selection || working} onClick={() => selection && resolve(conflict.id, selection)}>{busy === conflict.id ? <LoaderCircle className="spin" size={15} /> : null}{t('deviceSync.applyResolution')}</button></div></div> : null}</article> }) : <p className="device-sync-empty">{t('deviceSync.noConflicts')}</p>}</div> : null}
-              {activityTab === 'trash' ? <div className="device-sync-trash-list">{trash.length ? trash.slice(0, 8).map((item) => <article key={item.id}><span><strong>{item.skill_name}</strong><small>{new Date(item.deleted_at).toLocaleString()}</small></span><button className="btn btn-secondary" type="button" disabled={working} onClick={() => restore(item.id)}>{busy === item.id ? <LoaderCircle className="spin" size={15} /> : null}{t('deviceSync.restore')}</button></article>) : <p className="device-sync-empty">{t('deviceSync.trashEmpty')}</p>}</div> : null}
             </section>
           </>
         )}

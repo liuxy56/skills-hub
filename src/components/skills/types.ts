@@ -370,3 +370,37 @@ export type DeviceSyncTrashEntry = {
   deleted_at: number
   expires_at: number
 }
+
+export type RecycleBinTarget = {
+  id: string
+  skill_id: string
+  tool: string
+  scope: string
+  project_path?: string | null
+  target_path: string
+  mode: string
+  status: string
+  last_error?: string | null
+  synced_at?: number | null
+}
+
+export type RecycleBinItem = {
+  id: string
+  skill_id: string
+  skill_name: string
+  description?: string | null
+  tags: string[]
+  deletion_source: 'manual' | 'sync'
+  deleted_at: number
+  expires_at: number
+  enabled: boolean
+  source_type: string
+  source_ref?: string | null
+  targets: RecycleBinTarget[]
+  trash_path: string
+}
+
+export type RecycleBinLocations = {
+  manual_backup: string
+  sync_backup: string
+}

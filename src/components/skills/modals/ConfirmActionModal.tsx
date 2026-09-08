@@ -1,7 +1,8 @@
 import { memo, useEffect, useId, useRef, type ReactNode } from 'react'
-import { TriangleAlert } from 'lucide-react'
+import { Trash2, TriangleAlert } from 'lucide-react'
 
 type ConfirmActionModalProps = {
+  recoverable?: boolean
   open: boolean
   loading: boolean
   title: string
@@ -14,6 +15,7 @@ type ConfirmActionModalProps = {
 
 const ConfirmActionModal = ({
   open,
+  recoverable = false,
   loading,
   title,
   body,
@@ -82,7 +84,7 @@ const ConfirmActionModal = ({
     >
       <div
         ref={dialogRef}
-        className="modal modal-delete"
+        className={`modal modal-delete${recoverable ? ' modal-recoverable-delete' : ''}`}
         tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
         role="dialog"
@@ -92,14 +94,14 @@ const ConfirmActionModal = ({
       >
         <div className="modal-body delete-body">
           <div className="delete-title" id={titleId}>
-            <TriangleAlert size={20} />
+            {recoverable ? <Trash2 size={20} /> : <TriangleAlert size={20} />}
             {title}
           </div>
           <div className="delete-desc" id={descriptionId}>
             {body}
           </div>
         </div>
-        <div className="modal-footer space-between">
+        <div className="modal-footer">
           <button
             className="btn btn-secondary"
             type="button"
@@ -109,7 +111,7 @@ const ConfirmActionModal = ({
             {cancelLabel}
           </button>
           <button
-            className="btn btn-danger-solid"
+            className={`btn ${recoverable ? 'btn-danger' : 'btn-danger-solid'}`}
             type="button"
             onClick={onConfirm}
             disabled={loading}

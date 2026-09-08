@@ -23,7 +23,7 @@ use self::manifest::{portable_hash, skill_dir, SyncManifest};
 use self::merge::{plan_merge_with_text, MergePlan};
 use self::types::{
     ConflictResolution, DeviceSyncConfig, DeviceSyncDevice, SyncChangeItem, SyncChangeSummary,
-    SyncConflict, SyncRunResult, SyncStatus, TrashEntry,
+    SyncConflict, SyncRunResult, SyncStatus,
 };
 use crate::core::skill_store::SkillStore;
 
@@ -393,6 +393,13 @@ impl<'a> DeviceSyncService<'a> {
 
     pub fn restore_trash(&self, trash_id: &str) -> Result<()> {
         let _guard = try_lock_device_sync()?;
+        let recycle_bin = crate::core::recycle_bin::RecycleBinService::new(
+            self.store,
+            self.workspace_root.join("trash"),
+        );
+        if recycle_bin.has_snapshot(trash_id)? {
+            return recycle_bin.restore(trash_id);
+        }
         let entry = self
             .store
             .list_device_sync_trash()?
@@ -990,28 +997,11 @@ impl<'a> DeviceSyncService<'a> {
 
     fn apply_remote_deletions(&self, plan: &MergePlan) -> Result<()> {
         let trash_root = self.workspace_root.join("trash");
-        fs::create_dir_all(&trash_root)?;
         for id in &plan.delete_local {
-            let Some(record) = self.store.get_skill_by_id(id)? else {
-                continue;
-            };
-            let source = PathBuf::from(&record.central_path);
-            let trash_id = Uuid::new_v4().to_string();
-            let destination = trash_root.join(&trash_id);
-            if source.exists() {
-                fs::rename(&source, &destination)
-                    .with_context(|| format!("move deleted skill {:?} to trash", source))?;
+            if self.store.get_skill_by_id(id)?.is_some() {
+                crate::core::recycle_bin::RecycleBinService::new(self.store, trash_root.clone())
+                    .archive(id, crate::core::recycle_bin::DeletionSource::Sync, now_ms())?;
             }
-            let deleted_at = now_ms();
-            self.store.add_device_sync_trash(&TrashEntry {
-                id: trash_id,
-                skill_id: id.clone(),
-                skill_name: record.name,
-                trash_path: destination.to_string_lossy().to_string(),
-                deleted_at,
-                expires_at: deleted_at + 30 * 24 * 60 * 60 * 1000,
-            })?;
-            self.store.delete_skill(id)?;
         }
         Ok(())
     }
@@ -1343,6 +1333,7 @@ fn is_device_sync_running() -> bool {
 mod tests {
     use super::*;
     use crate::core::device_sync::credentials::{CredentialStore, MemoryCredentialStore};
+    use crate::core::device_sync::types::TrashEntry;
     use crate::core::skill_store::{SkillRecord, SkillTargetRecord};
     use git2::Repository;
 
@@ -1795,17 +1786,10 @@ mod tests {
             })
             .unwrap();
         let trash = store.list_device_sync_trash().unwrap().remove(0);
-        let metadata_key = format!("device_sync.trash_metadata.{}", trash.id);
-        let saved = store.get_setting(&metadata_key).unwrap().unwrap();
-        store
-            .set_setting(&metadata_key, r#"{"description":"Saved","tags":[""]}"#)
-            .unwrap();
-        assert!(service.restore_trash(&trash.id).is_err());
         assert!(store.get_skill_by_id("one").unwrap().is_none());
         assert!(Path::new(&trash.trash_path).join("SKILL.md").is_file());
         assert_eq!(store.list_device_sync_trash().unwrap().len(), 1);
         assert_eq!(fs::read_dir(&central).unwrap().count(), 0);
-        store.set_setting(&metadata_key, &saved).unwrap();
         for tag in store.list_tags_with_counts().unwrap() {
             store.delete_tag(tag.id).unwrap();
         }
