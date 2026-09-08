@@ -56,7 +56,9 @@ use crate::core::onboarding::{
     build_onboarding_plan, get_discovery_scan_settings as get_discovery_scan_settings_core,
     save_discovery_scan_config, DiscoveryScanConfig, DiscoveryScanSettings, OnboardingPlan,
 };
-use crate::core::skill_store::{SkillRecord, SkillStore, SkillTargetRecord};
+use crate::core::skill_store::{
+    SkillRecord, SkillStore, SkillTargetRecord, DEVICE_SYNC_HISTORY_LIMIT,
+};
 use crate::core::skills_search::{
     search_skills_online as search_skills_online_core, OnlineSkillResult,
 };
@@ -2632,7 +2634,7 @@ pub fn get_device_sync_history(
     limit: Option<usize>,
 ) -> Result<Vec<SyncHistoryEntry>, String> {
     store
-        .list_device_sync_history(limit.unwrap_or(50).max(1))
+        .list_device_sync_history(limit.unwrap_or(50).clamp(1, DEVICE_SYNC_HISTORY_LIMIT))
         .map_err(format_anyhow_error)
 }
 
