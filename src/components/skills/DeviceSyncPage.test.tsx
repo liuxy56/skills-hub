@@ -33,8 +33,8 @@ describe('DeviceSyncPage', () => {
     expect(screen.getByText('deviceSync.legacyHistoryNote')).toBeTruthy()
   })
 
-  it('loads older named changes beyond the first fifty records', async () => {
-    const history = Array.from({ length: 51 }, (_, i) => ({ id: `run-${i}`, started_at: 100-i, status: 'success', added: 1, updated: 0, deleted: 0, conflicted: 0, items: [{ skill_id: `skill-${i}`, name: `skill-${i}`, kind: 'added', direction: 'download' }] }))
+  it('loads the second half of the retained history once', async () => {
+    const history = Array.from({ length: 100 }, (_, i) => ({ id: `run-${i}`, started_at: 100-i, status: 'success', added: 1, updated: 0, deleted: 0, conflicted: 0, items: [{ skill_id: `skill-${i}`, name: `skill-${i}`, kind: 'added', direction: 'download' }] }))
     invokeMock.mockImplementation((command: string, args?: { limit?: number }) => {
       if (command === 'get_device_sync_config') return Promise.resolve({ provider: 'github', remote_url: 'https://github.com/example/sync.git', branch: 'main', has_credential: true })
       if (command === 'get_device_sync_status') return Promise.resolve({ configured: true, last_run_status: 'success', conflict_count: 0 })
@@ -46,7 +46,7 @@ describe('DeviceSyncPage', () => {
     fireEvent.click(await screen.findByRole('tab', { name: 'deviceSync.history' }))
     expect(screen.getByText('skill-49')).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'deviceSync.loadMoreHistory' }))
-    expect(await screen.findByText('skill-50')).toBeTruthy()
+    expect(await screen.findByText('skill-99')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'deviceSync.loadMoreHistory' })).toBeNull()
     expect(screen.getAllByText('skill-0')).toHaveLength(1)
   })

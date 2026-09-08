@@ -22,6 +22,7 @@ const DEVICE_SYNC_SCHEMA_VERSION_KEY: &str = "schema.device_sync";
 const DEVICE_SYNC_SCHEMA_VERSION: &str = "1";
 const RECYCLE_BIN_SCHEMA_VERSION_KEY: &str = "schema.recycle_bin";
 const RECYCLE_BIN_SCHEMA_VERSION: &str = "1";
+pub const DEVICE_SYNC_HISTORY_LIMIT: usize = 100;
 const DEVICE_SYNC_STARTUP_CREDENTIAL_CONSENT_MIGRATION: &str =
     "migration.device_sync_startup_credential_consent_v1";
 
@@ -80,6 +81,31 @@ ON device_sync_runs(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_device_sync_conflicts_status
 ON device_sync_conflicts(status, created_at DESC);
 "#;
+
+fn prune_device_sync_history(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute(
+        "DELETE FROM settings
+         WHERE key IN (
+           SELECT 'device_sync.run_items.' || id
+           FROM device_sync_runs
+           WHERE finished_at IS NOT NULL
+           ORDER BY started_at DESC, id DESC
+           LIMIT -1 OFFSET ?1
+         )",
+        params![DEVICE_SYNC_HISTORY_LIMIT as i64],
+    )?;
+    tx.execute(
+        "DELETE FROM device_sync_runs
+         WHERE id IN (
+           SELECT id FROM device_sync_runs
+           WHERE finished_at IS NOT NULL
+           ORDER BY started_at DESC, id DESC
+           LIMIT -1 OFFSET ?1
+         )",
+        params![DEVICE_SYNC_HISTORY_LIMIT as i64],
+    )?;
+    Ok(())
+}
 
 // Minimal schema for MVP: skills, skill_targets, settings, discovered_skills(optional).
 const SCHEMA_V1: &str = r#"
@@ -519,11 +545,23 @@ impl SkillStore {
 
     pub fn start_device_sync_run(&self, id: &str, started_at: i64) -> Result<()> {
         self.with_conn(|conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "DELETE FROM settings
+                 WHERE key IN (
+                   SELECT 'device_sync.run_items.' || id
+                   FROM device_sync_runs
+                   WHERE finished_at IS NULL
+                 )",
+                [],
+            )?;
+            tx.execute("DELETE FROM device_sync_runs WHERE finished_at IS NULL", [])?;
+            tx.execute(
                 "INSERT INTO device_sync_runs (id, started_at, status)
                  VALUES (?1, ?2, 'running')",
                 params![id, started_at],
             )?;
+            tx.commit()?;
             Ok(())
         })
     }
@@ -559,6 +597,7 @@ impl SkillStore {
             )?;
             if unchanged {
                 tx.execute("DELETE FROM device_sync_runs WHERE id = ?1", params![id])?;
+                prune_device_sync_history(&tx)?;
                 tx.commit()?;
                 return Ok(());
             }
@@ -582,6 +621,7 @@ impl SkillStore {
             if let Some(items) = items {
                 tx.execute("INSERT INTO settings (key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![format!("device_sync.run_items.{id}"), serde_json::to_string(items)?])?;
             }
+            prune_device_sync_history(&tx)?;
             tx.commit()?;
             Ok(())
         })
@@ -592,7 +632,9 @@ impl SkillStore {
             let mut stmt = conn.prepare(
                 "SELECT id, started_at, finished_at, status, added, updated, deleted,
                         conflicted, commit_hash, error
-                 FROM device_sync_runs ORDER BY started_at DESC, id DESC LIMIT ?1",
+                 FROM device_sync_runs
+                 WHERE finished_at IS NOT NULL
+                 ORDER BY started_at DESC, id DESC LIMIT ?1",
             )?;
             let rows = stmt.query_map(params![limit as i64], |row| {
                 let id: String = row.get(0)?;
@@ -817,6 +859,7 @@ impl SkillStore {
                 tx.execute("INSERT INTO device_sync_runs (id,started_at,finished_at,status,added,updated,deleted,conflicted,commit_hash) VALUES (?1,?2,?2,'resolved',?3,?4,?5,0,?6)", params![run_id, now, count("added"), count("updated"), count("deleted"), commit])?;
                 tx.execute("INSERT INTO settings (key,value) VALUES (?1,?2)", params![format!("device_sync.run_items.{run_id}"), serde_json::to_string(changes)?])?;
             }
+            prune_device_sync_history(&tx)?;
             tx.commit()?;
             Ok(())
         })

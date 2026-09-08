@@ -85,6 +85,9 @@ type DeviceSyncPageProps = {
   t: TFunction
 }
 
+const DEVICE_SYNC_HISTORY_PAGE_SIZE = 50
+const DEVICE_SYNC_HISTORY_LIMIT = 100
+
 const DeviceSyncPage = ({
   active,
   isTauri,
@@ -97,7 +100,7 @@ const DeviceSyncPage = ({
   const [config, setConfig] = useState<DeviceSyncConfigDto | null>(null)
   const [status, setStatus] = useState<DeviceSyncStatus | null>(null)
   const [history, setHistory] = useState<DeviceSyncHistoryEntry[]>([])
-  const historyLimitRef = useRef(50)
+  const historyLimitRef = useRef(DEVICE_SYNC_HISTORY_PAGE_SIZE)
   const historyRequestRef = useRef(0)
   const [loadingHistory, setLoadingHistory] = useState(false)
   const [devices, setDevices] = useState<DeviceSyncDevice[]>([])
@@ -234,7 +237,10 @@ const DeviceSyncPage = ({
     if (loadingHistory) return
     const request = ++historyRequestRef.current
     const previousLimit = historyLimitRef.current
-    historyLimitRef.current += 50
+    historyLimitRef.current = Math.min(
+      historyLimitRef.current + DEVICE_SYNC_HISTORY_PAGE_SIZE,
+      DEVICE_SYNC_HISTORY_LIMIT,
+    )
     setLoadingHistory(true)
     try {
       const nextHistory = await invoke<DeviceSyncHistoryEntry[]>('get_device_sync_history', { limit: historyLimitRef.current })
@@ -841,7 +847,7 @@ const DeviceSyncPage = ({
                     {item.status !== 'failed' ? <small>{t('deviceSync.legacyHistoryNote')}</small> : null}
                   </article>
                 )) : <p className="device-sync-empty">{t('deviceSync.noHistory')}</p>}
-                {history.length >= historyLimitRef.current || loadingHistory ? <button className="btn btn-secondary device-sync-history-more" type="button" disabled={loadingHistory} onClick={loadMoreHistory}>{loadingHistory ? <LoaderCircle className="spin" size={15} /> : null}{t('deviceSync.loadMoreHistory')}</button> : null}
+                {(historyLimitRef.current < DEVICE_SYNC_HISTORY_LIMIT && history.length >= historyLimitRef.current) || loadingHistory ? <button className="btn btn-secondary device-sync-history-more" type="button" disabled={loadingHistory} onClick={loadMoreHistory}>{loadingHistory ? <LoaderCircle className="spin" size={15} /> : null}{t('deviceSync.loadMoreHistory')}</button> : null}
               </div> : null}
               {activityTab === 'conflicts' ? <div className="device-sync-conflicts">{conflicts.length ? conflicts.map((conflict) => { const expanded = expandedConflictId === conflict.id; const selection = conflictSelections[conflict.id]; return <article key={conflict.id} className={expanded ? 'expanded' : ''}><button className="device-sync-conflict-summary" type="button" onClick={() => setExpandedConflictId(expanded ? null : conflict.id)}>{expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}<Package size={17} /><strong>{conflict.skill_name}</strong><span>{t(conflict.base_commit ? 'deviceSync.sameFilesChanged' : 'deviceSync.missingCommonBaseline')}</span><em>{t('deviceSync.conflictFiles', { count: conflict.files.length })}</em></button>{expanded ? <div className="device-sync-conflict-detail"><div className="device-sync-conflict-files">{conflict.files.map((file) => <code key={file}>{file}</code>)}</div><div className="device-sync-resolution-options">{(['keep_local', 'use_remote'] as ConflictResolution[]).map((resolution) => <button key={resolution} className={selection === resolution ? 'selected' : ''} type="button" onClick={() => setConflictSelections((current) => ({ ...current, [conflict.id]: resolution }))}><span><strong>{t(`deviceSync.resolution.${resolution}.title`)}</strong></span><small>{t(`deviceSync.resolution.${resolution}.help`)}</small></button>)}</div><div className="device-sync-conflict-footer"><span><ShieldCheck size={14} />{t('deviceSync.conflictSafetyNote')}</span><button className="btn btn-primary" type="button" disabled={!selection || working} onClick={() => selection && resolve(conflict.id, selection)}>{busy === conflict.id ? <LoaderCircle className="spin" size={15} /> : null}{t('deviceSync.applyResolution')}</button></div></div> : null}</article> }) : <p className="device-sync-empty">{t('deviceSync.noConflicts')}</p>}</div> : null}
             </section>

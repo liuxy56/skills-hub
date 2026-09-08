@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use crate::core::skill_store::{SkillRecord, SkillStore, SkillTargetRecord};
 use crate::core::{
-    device_sync::{credentials::MemoryCredentialStore, types::DeviceSyncConfig},
+    device_sync::{
+        credentials::MemoryCredentialStore,
+        types::{DeviceSyncConfig, SyncChangeItem, SyncConflict},
+    },
     github_token::resolve_github_token,
 };
 use rusqlite::Connection;
@@ -1114,6 +1117,160 @@ fn history_can_load_beyond_fifty_without_duplicates() {
             .len(),
         55
     );
+}
+
+#[test]
+fn sync_history_keeps_only_the_latest_one_hundred_runs_and_their_details() {
+    let (_dir, store) = make_store();
+    for i in 0..101 {
+        let id = format!("run-{i:03}");
+        store.start_device_sync_run(&id, i).unwrap();
+        store
+            .finish_device_sync_run(&id, i, "success", 1, 0, 0, 0, None, None, Some(&[]))
+            .unwrap();
+    }
+
+    let history = store.list_device_sync_history(200).unwrap();
+    assert_eq!(history.len(), 100);
+    assert_eq!(history.first().unwrap().id, "run-100");
+    assert_eq!(history.last().unwrap().id, "run-001");
+    assert_eq!(
+        store.get_setting("device_sync.run_items.run-000").unwrap(),
+        None
+    );
+}
+
+#[test]
+fn unchanged_sync_prunes_history_left_over_from_older_versions() {
+    let (_dir, store) = make_store();
+    store
+        .with_conn(|conn| {
+            for i in 0..101 {
+                conn.execute(
+                    "INSERT INTO device_sync_runs (id, started_at, finished_at, status, added)
+                     VALUES (?1, ?2, ?2, 'success', 1)",
+                    rusqlite::params![format!("legacy-{i:03}"), i],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    store.start_device_sync_run("unchanged", 200).unwrap();
+    store
+        .finish_device_sync_run(
+            "unchanged",
+            201,
+            "success",
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(&[]),
+        )
+        .unwrap();
+
+    let history = store.list_device_sync_history(200).unwrap();
+    assert_eq!(history.len(), 100);
+    assert_eq!(history.first().unwrap().id, "legacy-100");
+    assert_eq!(history.last().unwrap().id, "legacy-001");
+}
+
+#[test]
+fn abandoned_running_sync_does_not_replace_a_completed_history_entry() {
+    let (_dir, store) = make_store();
+    store
+        .with_conn(|conn| {
+            for i in 0..100 {
+                conn.execute(
+                    "INSERT INTO device_sync_runs (id, started_at, finished_at, status, added)
+                     VALUES (?1, ?2, ?2, 'success', 1)",
+                    rusqlite::params![format!("legacy-{i:03}"), i],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store.start_device_sync_run("abandoned", 100).unwrap();
+    let visible_before_retry = store.list_device_sync_history(200).unwrap();
+    assert_eq!(visible_before_retry.len(), 100);
+    assert!(visible_before_retry
+        .iter()
+        .all(|run| run.status != "running"));
+
+    store.start_device_sync_run("current", 200).unwrap();
+    store
+        .finish_device_sync_run(
+            "current",
+            201,
+            "failed",
+            0,
+            0,
+            0,
+            0,
+            None,
+            Some("network unavailable"),
+            None,
+        )
+        .unwrap();
+
+    let history = store.list_device_sync_history(200).unwrap();
+    assert_eq!(history.len(), 100);
+    assert_eq!(history.first().unwrap().id, "current");
+    assert_eq!(history.last().unwrap().id, "legacy-001");
+    assert!(history.iter().all(|run| run.status != "running"));
+}
+
+#[test]
+fn resolved_conflict_history_also_respects_the_retention_limit() {
+    let (_dir, store) = make_store();
+    store
+        .with_conn(|conn| {
+            for i in 0..100 {
+                conn.execute(
+                    "INSERT INTO device_sync_runs (id, started_at, finished_at, status, added)
+                     VALUES (?1, ?2, ?2, 'success', 1)",
+                    rusqlite::params![format!("legacy-{i:03}"), i],
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    store
+        .upsert_device_sync_conflict(&SyncConflict {
+            id: "conflict".into(),
+            skill_id: "skill".into(),
+            skill_name: "Skill".into(),
+            base_commit: Some("base".into()),
+            local_commit: "local".into(),
+            remote_commit: "remote".into(),
+            files: vec!["SKILL.md".into()],
+            created_at: 100,
+            status: "pending".into(),
+        })
+        .unwrap();
+
+    store
+        .resolve_device_sync_conflict_with_state(
+            "conflict",
+            "device_sync.resolution.test",
+            "{}",
+            &[SyncChangeItem {
+                skill_id: "skill".into(),
+                name: "Skill".into(),
+                kind: "updated".into(),
+                direction: "download".into(),
+            }],
+            "resolved-commit",
+        )
+        .unwrap();
+
+    let history = store.list_device_sync_history(200).unwrap();
+    assert_eq!(history.len(), 100);
+    assert_eq!(history.first().unwrap().status, "resolved");
+    assert_eq!(history.last().unwrap().id, "legacy-001");
 }
 
 #[test]
