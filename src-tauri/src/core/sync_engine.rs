@@ -543,12 +543,16 @@ fn recycle_path(path: &Path) -> Result<()> {
     remove_path_permanently(path)
 }
 
-fn remove_path_permanently(path: &Path) -> Result<()> {
+pub(crate) fn remove_path_permanently(path: &Path) -> Result<()> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(err) => return Err(err).with_context(|| format!("stat {:?}", path)),
     };
+    #[cfg(windows)]
+    if metadata.file_type().is_symlink() && std::fs::remove_dir(path).is_ok() {
+        return Ok(());
+    }
     if metadata.file_type().is_symlink() || metadata.is_file() {
         std::fs::remove_file(path).with_context(|| format!("remove file {:?}", path))
     } else {

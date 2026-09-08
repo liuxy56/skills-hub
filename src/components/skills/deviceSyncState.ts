@@ -100,7 +100,7 @@ export const getRepositoryDisplayName = (remoteUrl: string): string => {
   return match?.[1] || normalized
 }
 
-export type DeviceSyncActivity = 'devices' | 'history' | 'conflicts' | 'trash'
+export type DeviceSyncActivity = 'devices' | 'history' | 'conflicts'
 export type DeviceConnectionState = 'synced' | 'pending' | 'stale'
 
 export const getOtherDeviceSummary = (

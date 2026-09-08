@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Settings,
   Tag,
+  Trash2,
   Wrench,
 } from 'lucide-react'
 import type { TFunction } from 'i18next'
@@ -17,13 +18,14 @@ import type { TFunction } from 'i18next'
 type ManagementTab = 'tags' | 'tools' | 'updates'
 
 type HeaderProps = {
-  activeView: 'myskills' | 'explore' | 'detail' | 'settings' | 'manage' | 'device-sync'
+  activeView: 'myskills' | 'explore' | 'detail' | 'settings' | 'manage' | 'device-sync' | 'recycle-bin'
   managementTab: ManagementTab
   skillCount: number
   tagCount: number
   toolCount: number
   updateCount: number
   syncConflictCount: number
+  recycleBinCount: number
   appVersion: string
   updateAvailableVersion: string | null
   updateChecking: boolean
@@ -34,7 +36,7 @@ type HeaderProps = {
   onOpenSettings: () => void
   onOpenUpdate: () => void
   onRestart: () => void
-  onViewChange: (view: 'myskills' | 'explore' | 'manage' | 'device-sync') => void
+  onViewChange: (view: 'myskills' | 'explore' | 'manage' | 'device-sync' | 'recycle-bin') => void
   onManagementTabChange: (tab: ManagementTab) => void
   t: TFunction
 }
@@ -55,6 +57,7 @@ const Header = ({
   toolCount,
   updateCount,
   syncConflictCount,
+  recycleBinCount,
   appVersion,
   updateAvailableVersion,
   updateChecking,
@@ -173,6 +176,10 @@ const Header = ({
           <Compass size={18} />
           <span>{t('addSkills')}</span>
         </button>
+      </nav>
+
+      <div className="sidebar-section-label">{t('navManageCenter')}</div>
+      <nav className="sidebar-nav" aria-label={t('navManageCenter')}>
         <button
           className={activeView === 'device-sync' ? 'active' : ''}
           type="button"
@@ -183,10 +190,6 @@ const Header = ({
           <span>{t('deviceSync.nav')}</span>
           {syncConflictCount > 0 ? <em>{syncConflictCount}</em> : null}
         </button>
-      </nav>
-
-      <div className="sidebar-section-label">{t('navManageCenter')}</div>
-      <nav className="sidebar-nav" aria-label={t('navManageCenter')}>
         <button
           className={activeView === 'manage' && managementTab === 'tags' ? 'active' : ''}
           type="button"
@@ -216,6 +219,16 @@ const Header = ({
           <RefreshCw size={18} />
           <span>{t('manageTabs.updates')}</span>
           <em>{updateCount}</em>
+        </button>
+        <button
+          className={activeView === 'recycle-bin' ? 'active' : ''}
+          type="button"
+          onClick={() => onViewChange('recycle-bin')}
+          title={collapsed ? t('recycleBin.nav') : undefined}
+        >
+          <Trash2 size={18} />
+          <span>{t('recycleBin.nav')}</span>
+          {recycleBinCount > 0 ? <em>{recycleBinCount}</em> : null}
         </button>
       </nav>
 

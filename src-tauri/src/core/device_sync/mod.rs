@@ -23,7 +23,7 @@ use self::manifest::{portable_hash, skill_dir, SyncManifest};
 use self::merge::{plan_merge_with_text, MergePlan};
 use self::types::{
     ConflictResolution, DeviceSyncConfig, DeviceSyncDevice, SyncChangeItem, SyncChangeSummary,
-    SyncConflict, SyncRunResult, SyncStatus, TrashEntry,
+    SyncConflict, SyncRunResult, SyncStatus,
 };
 use crate::core::skill_store::SkillStore;
 
@@ -221,7 +221,13 @@ impl<'a> DeviceSyncService<'a> {
     pub fn devices(&self) -> Result<Vec<DeviceSyncDevice>> {
         self.require_config()?;
         let current = self.local_device_identity()?;
-        self.store.list_device_sync_devices(&current.id)
+        let mut devices = self.store.list_device_sync_devices(&current.id)?;
+        for device in &mut devices {
+            if device.is_current {
+                device.name.clone_from(&current.name);
+            }
+        }
+        Ok(devices)
     }
 
     pub fn sync(&self) -> Result<SyncRunResult> {
@@ -393,6 +399,13 @@ impl<'a> DeviceSyncService<'a> {
 
     pub fn restore_trash(&self, trash_id: &str) -> Result<()> {
         let _guard = try_lock_device_sync()?;
+        let recycle_bin = crate::core::recycle_bin::RecycleBinService::new(
+            self.store,
+            self.workspace_root.join("trash"),
+        );
+        if recycle_bin.has_snapshot(trash_id)? {
+            return recycle_bin.restore(trash_id);
+        }
         let entry = self
             .store
             .list_device_sync_trash()?
@@ -607,9 +620,14 @@ impl<'a> DeviceSyncService<'a> {
                 id
             }
         };
+        let name = self
+            .store
+            .get_setting(&format!("device_sync.device_alias.{id}"))?
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(local_device_name);
         Ok(DeviceSyncDevice {
             id,
-            name: local_device_name(),
+            name,
             alias: None,
             last_commit: None,
             last_seen_at: now_ms(),
@@ -990,28 +1008,11 @@ impl<'a> DeviceSyncService<'a> {
 
     fn apply_remote_deletions(&self, plan: &MergePlan) -> Result<()> {
         let trash_root = self.workspace_root.join("trash");
-        fs::create_dir_all(&trash_root)?;
         for id in &plan.delete_local {
-            let Some(record) = self.store.get_skill_by_id(id)? else {
-                continue;
-            };
-            let source = PathBuf::from(&record.central_path);
-            let trash_id = Uuid::new_v4().to_string();
-            let destination = trash_root.join(&trash_id);
-            if source.exists() {
-                fs::rename(&source, &destination)
-                    .with_context(|| format!("move deleted skill {:?} to trash", source))?;
+            if self.store.get_skill_by_id(id)?.is_some() {
+                crate::core::recycle_bin::RecycleBinService::new(self.store, trash_root.clone())
+                    .archive(id, crate::core::recycle_bin::DeletionSource::Sync, now_ms())?;
             }
-            let deleted_at = now_ms();
-            self.store.add_device_sync_trash(&TrashEntry {
-                id: trash_id,
-                skill_id: id.clone(),
-                skill_name: record.name,
-                trash_path: destination.to_string_lossy().to_string(),
-                deleted_at,
-                expires_at: deleted_at + 30 * 24 * 60 * 60 * 1000,
-            })?;
-            self.store.delete_skill(id)?;
         }
         Ok(())
     }
@@ -1343,6 +1344,7 @@ fn is_device_sync_running() -> bool {
 mod tests {
     use super::*;
     use crate::core::device_sync::credentials::{CredentialStore, MemoryCredentialStore};
+    use crate::core::device_sync::types::TrashEntry;
     use crate::core::skill_store::{SkillRecord, SkillTargetRecord};
     use git2::Repository;
 
@@ -1795,17 +1797,10 @@ mod tests {
             })
             .unwrap();
         let trash = store.list_device_sync_trash().unwrap().remove(0);
-        let metadata_key = format!("device_sync.trash_metadata.{}", trash.id);
-        let saved = store.get_setting(&metadata_key).unwrap().unwrap();
-        store
-            .set_setting(&metadata_key, r#"{"description":"Saved","tags":[""]}"#)
-            .unwrap();
-        assert!(service.restore_trash(&trash.id).is_err());
         assert!(store.get_skill_by_id("one").unwrap().is_none());
         assert!(Path::new(&trash.trash_path).join("SKILL.md").is_file());
         assert_eq!(store.list_device_sync_trash().unwrap().len(), 1);
         assert_eq!(fs::read_dir(&central).unwrap().count(), 0);
-        store.set_setting(&metadata_key, &saved).unwrap();
         for tag in store.list_tags_with_counts().unwrap() {
             store.delete_tag(tag.id).unwrap();
         }
@@ -1956,7 +1951,46 @@ mod tests {
         );
         service_a.sync().unwrap();
         service_b.sync().unwrap();
+        // Existing local aliases become the device's published name.
+        a.set_setting("device_sync.device_alias.office", "办公室 Mac")
+            .unwrap();
+        b.set_setting("device_sync.device_alias.office", "旧备注")
+            .unwrap();
         service_a.sync().unwrap();
+        service_b.check().unwrap();
+        assert_eq!(
+            service_b
+                .devices()
+                .unwrap()
+                .iter()
+                .find(|d| d.id == "office")
+                .unwrap()
+                .name,
+            "办公室 Mac"
+        );
+        assert!(service_b
+            .devices()
+            .unwrap()
+            .iter()
+            .all(|d| d.alias.is_none()));
+        a.set_device_sync_device_alias("office", Some("工作电脑"))
+            .unwrap();
+        assert_eq!(service_a.devices().unwrap()[0].name, "工作电脑");
+        assert!(b
+            .set_device_sync_device_alias("office", Some("不允许修改他机"))
+            .is_err());
+        service_a.sync().unwrap();
+        service_b.sync().unwrap();
+        assert_eq!(
+            service_b
+                .devices()
+                .unwrap()
+                .iter()
+                .find(|d| d.id == "office")
+                .unwrap()
+                .name,
+            "工作电脑"
+        );
         let remote = Repository::open_bare(bare).unwrap();
         let commit = remote
             .find_reference("refs/heads/main")
@@ -1969,6 +2003,7 @@ mod tests {
             .expect("shared registry must be published");
         let blob = remote.find_blob(entry.id()).unwrap();
         let registry: serde_json::Value = serde_json::from_slice(blob.content()).unwrap();
+        assert_eq!(registry["devices"]["office"]["name"], "工作电脑");
         assert_eq!(registry["version"], 1);
         assert_eq!(registry["devices"].as_object().unwrap().len(), 2);
         assert!(
@@ -1987,6 +2022,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(service_b.devices().unwrap().len(), 2);
+        a.set_device_sync_device_alias("office", None).unwrap();
+        assert_eq!(service_a.devices().unwrap()[0].name, local_device_name());
+        service_a.sync().unwrap();
     }
 
     #[test]

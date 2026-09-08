@@ -56,6 +56,7 @@ use crate::core::onboarding::{
     build_onboarding_plan, get_discovery_scan_settings as get_discovery_scan_settings_core,
     save_discovery_scan_config, DiscoveryScanConfig, DiscoveryScanSettings, OnboardingPlan,
 };
+use crate::core::recycle_bin::{DeletionSource, RecycleBinItem, RecycleBinService};
 use crate::core::skill_store::{
     SkillRecord, SkillStore, SkillTargetRecord, DEVICE_SYNC_HISTORY_LIMIT,
 };
@@ -1932,68 +1933,13 @@ pub async fn delete_managed_skill(
         // 便于排查“按钮点了没反应”：确认前端确实触发了命令
         println!("[delete_managed_skill] skillId={}", skillId);
 
-        // 先删除已同步到各工具目录的副本/软链接
-        // 注意：如果先删 skills 行，会触发 skill_targets cascade，导致无法再拿到 target_path
-        let targets = store.list_skill_targets(&skillId)?;
-
-        let mut remove_failures: Vec<String> = Vec::new();
-        for target in targets {
-            if let Err(err) = remove_skill_target_safely(&store, &skillId, &target.target_path) {
-                remove_failures.push(format!("{}: {}", target.target_path, err));
-            }
-        }
-
-        let record = store.get_skill_by_id(&skillId)?;
-        if let Some(skill) = record {
-            let path = std::path::PathBuf::from(&skill.central_path);
-            let overlaps_local_source = match skill.external_local_source() {
-                Some(source) => paths_overlap(&path, std::path::Path::new(source))?,
-                None => false,
-            };
-            if path.exists() && !overlaps_local_source {
-                if store.get_device_sync_config()?.is_some() {
-                    let trash_id = Uuid::new_v4().to_string();
-                    let trash_path = app
-                        .path()
-                        .app_data_dir()?
-                        .join("device-sync")
-                        .join("trash")
-                        .join(&trash_id);
-                    std::fs::create_dir_all(
-                        trash_path.parent().context("trash path has no parent")?,
-                    )?;
-                    copy_dir_recursive(&path, &trash_path)
-                        .context("copy deleted Skill to the recoverable app recycle bin")?;
-                    if let Err(err) = remove_path_any_core(&path)
-                        .context("move deleted Skill to the system recycle bin")
-                    {
-                        let _ = remove_path_any_core(&trash_path);
-                        return Err(err);
-                    }
-                    let deleted_at = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64;
-                    store.add_device_sync_trash(&TrashEntry {
-                        id: trash_id,
-                        skill_id: skill.id.clone(),
-                        skill_name: skill.name.clone(),
-                        trash_path: trash_path.to_string_lossy().to_string(),
-                        deleted_at,
-                        expires_at: deleted_at + 30 * 24 * 60 * 60 * 1000,
-                    })?;
-                } else {
-                    remove_path_any_core(&path)?;
-                }
-            }
-            store.delete_skill(&skillId)?;
-        }
-
-        if !remove_failures.is_empty() {
-            anyhow::bail!(
-                "已删除托管记录，但清理部分工具目录失败：\n- {}",
-                remove_failures.join("\n- ")
-            );
+        if store.get_skill_by_id(&skillId)?.is_some() {
+            let trash_root = app.path().app_data_dir()?.join("recycle-bin");
+            RecycleBinService::new(&store, trash_root).archive(
+                &skillId,
+                DeletionSource::Manual,
+                now_ms(),
+            )?;
         }
 
         Ok::<_, anyhow::Error>(())
@@ -2674,6 +2620,90 @@ pub fn get_device_sync_conflicts(
 #[tauri::command]
 pub fn get_device_sync_trash(store: State<'_, SkillStore>) -> Result<Vec<TrashEntry>, String> {
     store.list_device_sync_trash().map_err(format_anyhow_error)
+}
+
+#[derive(Serialize)]
+pub struct RecycleBinLocationsDto {
+    pub manual_backup: String,
+    pub sync_backup: String,
+}
+
+#[tauri::command]
+pub fn get_recycle_bin_locations(app: tauri::AppHandle) -> Result<RecycleBinLocationsDto, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?;
+    Ok(RecycleBinLocationsDto {
+        manual_backup: root.join("recycle-bin").to_string_lossy().into_owned(),
+        sync_backup: root
+            .join("device-sync")
+            .join("trash")
+            .to_string_lossy()
+            .into_owned(),
+    })
+}
+
+#[tauri::command]
+pub fn get_recycle_bin_items(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+) -> Result<Vec<RecycleBinItem>, String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("recycle-bin");
+    RecycleBinService::new(&store, root)
+        .list()
+        .map_err(format_anyhow_error)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn restore_recycle_bin_item(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+    trashId: String,
+    targetIds: Vec<String>,
+) -> Result<(), String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = app.path().app_data_dir()?.join("recycle-bin");
+        let service = RecycleBinService::new(&store, root);
+        if service.has_snapshot(&trashId)? {
+            let _device_sync_guard = if store.get_device_sync_config()?.is_some() {
+                Some(crate::core::device_sync::try_lock_device_sync()?)
+            } else {
+                None
+            };
+            service.restore_with_targets(&trashId, Some(&targetIds))
+        } else {
+            let (workspace, central) = device_sync_paths(&app, &store)?;
+            let credentials = SystemCredentialStore;
+            DeviceSyncService::new(&store, &credentials, workspace, central).restore_trash(&trashId)
+        }
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(format_anyhow_error)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+pub async fn delete_recycle_bin_item(
+    app: tauri::AppHandle,
+    store: State<'_, SkillStore>,
+    trashId: String,
+) -> Result<(), String> {
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = app.path().app_data_dir()?.join("recycle-bin");
+        RecycleBinService::new(&store, root).delete_permanently(&trashId)
+    })
+    .await
+    .map_err(|err| err.to_string())?
+    .map_err(format_anyhow_error)
 }
 
 #[tauri::command]
